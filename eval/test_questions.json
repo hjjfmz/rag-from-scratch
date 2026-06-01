@@ -1,0 +1,102 @@
+[
+  {
+    "question": "Can I return an opened product at GlowBeauty?",
+    "expected_source": "sample_data/policies/refund-policy.md",
+    "expected_keywords": ["30 days", "opened", "receipt"]
+  },
+  {
+    "question": "How long does standard shipping take?",
+    "expected_source": "sample_data/policies/shipping-policy.md",
+    "expected_keywords": ["5-7 business days", "free", "$50"]
+  },
+  {
+    "question": "How does the GlowRewards loyalty program work?",
+    "expected_source": "sample_data/policies/loyalty-program.md",
+    "expected_keywords": ["points", "tier", "birthday"]
+  },
+  {
+    "question": "Does GlowBeauty price match competitors?",
+    "expected_source": "sample_data/policies/price-match-policy.md",
+    "expected_keywords": ["14 days", "identical", "online"]
+  },
+  {
+    "question": "How many PTO days do full-time employees get?",
+    "expected_source": "sample_data/hr/pto-policy.md",
+    "expected_keywords": ["15 days", "accrual", "rollover"]
+  },
+  {
+    "question": "What is the dress code for store employees?",
+    "expected_source": "sample_data/hr/dress-code.md",
+    "expected_keywords": ["black", "name badge", "clean beauty"]
+  },
+  {
+    "question": "What are the steps in GlowBeauty's interview process?",
+    "expected_source": "sample_data/hr/hiring-process.md",
+    "expected_keywords": ["phone screen", "in-store", "shadow"]
+  },
+  {
+    "question": "What health benefits does GlowBeauty offer?",
+    "expected_source": "sample_data/hr/benefits-overview.md",
+    "expected_keywords": ["medical", "dental", "401k"]
+  },
+  {
+    "question": "What ingredients are in the Vitamin C Brightening Serum?",
+    "expected_source": "sample_data/products/skincare-guide.md",
+    "expected_keywords": ["ascorbic acid", "hyaluronic", "niacinamide"]
+  },
+  {
+    "question": "What is GlowBeauty's best-selling foundation?",
+    "expected_source": "sample_data/products/makeup-catalog.md",
+    "expected_keywords": ["Silk Skin", "40 shades", "SPF"]
+  },
+  {
+    "question": "What makes a product 'Clean at Glow' certified?",
+    "expected_source": "sample_data/products/clean-beauty-standards.md",
+    "expected_keywords": ["paraben", "sulfate", "cruelty-free"]
+  },
+  {
+    "question": "What is the store opening procedure?",
+    "expected_source": "sample_data/operations/store-operations-manual.md",
+    "expected_keywords": ["alarm", "8:30 AM", "register"]
+  },
+  {
+    "question": "How do we handle inventory discrepancies?",
+    "expected_source": "sample_data/operations/inventory-management.md",
+    "expected_keywords": ["shrinkage", "cycle count", "report"]
+  },
+  {
+    "question": "How should I handle an angry customer?",
+    "expected_source": "sample_data/operations/customer-service-handbook.md",
+    "expected_keywords": ["HEART", "listen", "empathize", "escalate"]
+  },
+  {
+    "question": "How do I reset my GlowBeauty online account password?",
+    "expected_source": "sample_data/faq/customer-faq.md",
+    "expected_keywords": ["reset", "email", "link"]
+  },
+  {
+    "question": "When is payday for GlowBeauty employees?",
+    "expected_source": "sample_data/faq/employee-faq.md",
+    "expected_keywords": ["bi-weekly", "Friday", "direct deposit"]
+  },
+  {
+    "question": "What is GlowBeauty's employee discount?",
+    "expected_source": "sample_data/hr/benefits-overview.md",
+    "expected_keywords": ["40%", "discount", "products"]
+  },
+  {
+    "question": "Can I use a gift card online?",
+    "expected_source": "sample_data/policies/gift-card-policy.md",
+    "expected_keywords": ["online", "in-store", "no expiration"]
+  },
+  {
+    "question": "What is the fire evacuation procedure?",
+    "expected_source": "sample_data/operations/safety-procedures.md",
+    "expected_keywords": ["evacuation", "assembly point", "fire extinguisher"]
+  },
+  {
+    "question": "What is the capital of France?",
+    "expected_source": null,
+    "expected_keywords": []
+  }
+]

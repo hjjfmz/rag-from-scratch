@@ -1,0 +1,82 @@
+[
+  {
+    "text": "cooking recipe 0",
+    "embedding": [
+      0.99,
+      0.99,
+      0.99,
+      0.99,
+      0.99,
+      0.99,
+      0.99,
+      0.99
+    ],
+    "metadata": {
+      "source": "cooking.md"
+    }
+  },
+  {
+    "text": "cooking recipe 1",
+    "embedding": [
+      0.99,
+      0.99,
+      0.99,
+      0.99,
+      0.99,
+      0.99,
+      0.99,
+      0.99
+    ],
+    "metadata": {
+      "source": "cooking.md"
+    }
+  },
+  {
+    "text": "cooking recipe 2",
+    "embedding": [
+      0.99,
+      0.99,
+      0.99,
+      0.99,
+      0.99,
+      0.99,
+      0.99,
+      0.99
+    ],
+    "metadata": {
+      "source": "cooking.md"
+    }
+  },
+  {
+    "text": "cooking recipe 3",
+    "embedding": [
+      0.99,
+      0.99,
+      0.99,
+      0.99,
+      0.99,
+      0.99,
+      0.99,
+      0.99
+    ],
+    "metadata": {
+      "source": "cooking.md"
+    }
+  },
+  {
+    "text": "cooking recipe 4",
+    "embedding": [
+      0.99,
+      0.99,
+      0.99,
+      0.99,
+      0.99,
+      0.99,
+      0.99,
+      0.99
+    ],
+    "metadata": {
+      "source": "cooking.md"
+    }
+  }
+]

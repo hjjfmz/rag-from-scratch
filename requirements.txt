@@ -1,0 +1,8 @@
+requests          # HTTP calls to OpenAI API (no SDK — we learn the raw API)
+python-dotenv     # Load API key from .env file
+PyPDF2            # PDF text extraction
+beautifulsoup4    # HTML → plain text for web scraping
+fastapi           # Web API framework
+uvicorn           # ASGI server for FastAPI
+python-multipart  # For file uploads
+pydantic          # Data validation
