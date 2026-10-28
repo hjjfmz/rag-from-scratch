@@ -247,3 +247,12 @@ class TestReciprocalRankFusion:
         fused = reciprocal_rank_fusion(vec, bm25)
         for r in fused:
             assert "score" in r
+
+    def test_third_list_boosts_a_chunk_present_in_vector_and_graph(self):
+        from rag.bm25 import reciprocal_rank_fusion
+
+        shared = {"text": "shared chunk " + "x" * 80, "metadata": {"source": "a.md"}, "score": 1}
+        only_graph = {"text": "graph only " + "y" * 80, "metadata": {"source": "b.md"}, "score": 1}
+        fused = reciprocal_rank_fusion([shared], [], [shared, only_graph], top_k=2)
+        assert fused[0]["text"].startswith("shared")
+        assert len(fused) == 2

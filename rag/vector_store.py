@@ -209,6 +209,10 @@ class VectorStore:
             self.entries = json.load(f)
         print(f"  📂 Loaded {len(self.entries)} entries from {path}")
 
+    def replace_entries(self, entries: list[dict]):
+        """Replace the stored chunks. Used when rebuilding part of the index."""
+        self.entries = list(entries)
+
     def __len__(self) -> int:
         return len(self.entries)
 
@@ -224,6 +228,25 @@ class VectorStore:
             source = entry.get("metadata", {}).get("source", "unknown")
             sources.add(source)
         return sorted(sources)
+
+
+def create_vector_store():
+    """Build the vector backend selected by VECTOR_BACKEND.
+
+    "json" is the exact cosine store. "qdrant" is the persistent HNSW adapter.
+    Both expose add, search, save, load, entries, and replace_entries.
+    """
+    import os
+
+    backend = os.getenv("VECTOR_BACKEND", "json").strip().lower() or "json"
+    if backend == "json":
+        return VectorStore()
+    if backend == "qdrant":
+        from rag.qdrant_store import QdrantVectorStore
+        return QdrantVectorStore()
+    raise ValueError(
+        f"Unknown VECTOR_BACKEND '{backend}'. Use 'json' or 'qdrant'."
+    )
 
 
 # ── Manual testing ─────────────────────────────────────────────

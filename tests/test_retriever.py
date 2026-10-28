@@ -11,6 +11,7 @@ import pytest
 from unittest.mock import patch
 from rag.vector_store import VectorStore
 from rag.retriever import Retriever
+from rag.graph_store import GraphStore
 
 
 def _make_store_with_fake_vectors():
@@ -100,3 +101,40 @@ class TestRetriever:
         results = retriever.retrieve("test")
 
         assert results == []
+
+
+class TestHybridGraph:
+    @patch("rag.retriever.extract_entity_names", return_value=[])
+    @patch("rag.retriever.embed_query")
+    def test_graph_chunk_is_fused_ahead_of_unrelated_vector_hit(self, mock_embed, _mock_names):
+        from rag.graph_store import GraphStore
+
+        mock_embed.return_value = [0.0, 0.0, 1.0]
+        store = VectorStore()
+        store.add(
+            text="Stock prices rose 5% today and the finance desk closed.",
+            embedding=[0.0, 0.0, 1.0],
+            metadata={"source": "finance.md", "chunk_index": 0, "chunk_id": "finance.md::0"},
+        )
+        store.add(
+            text="GlowBeauty return window is 30 days from delivery.",
+            embedding=[1.0, 0.0, 0.0],
+            metadata={"source": "refund.md", "chunk_index": 0, "chunk_id": "refund.md::0"},
+        )
+        graph = GraphStore()
+        graph.add_extraction(["GlowBeauty"], [], "refund.md::0")
+
+        retriever = Retriever(store, top_k=1, threshold=0.0, search_mode="hybrid_graph", graph_store=graph)
+        results = retriever.retrieve("GlowBeauty return window")
+
+        assert results
+        assert results[0]["metadata"]["source"] == "refund.md"
+
+    @patch("rag.retriever.embed_query")
+    def test_empty_graph_falls_back_to_hybrid(self, mock_embed):
+        mock_embed.return_value = [0.9, 0.1, 0.0]
+        store = _make_store_with_fake_vectors()
+        retriever = Retriever(store, top_k=2, threshold=0.0, search_mode="hybrid_graph", graph_store=GraphStore())
+        results = retriever.retrieve("machine learning")
+        assert results
+        assert "score" in results[0]

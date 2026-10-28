@@ -5,4 +5,4 @@ beautifulsoup4    # HTML → plain text for web scraping
 fastapi           # Web API framework
 uvicorn           # ASGI server for FastAPI
 python-multipart  # For file uploads
-pydantic          # Data validation
+qdrant-client    # Optional Qdrant adapter (VECTOR_BACKEND=qdrant)

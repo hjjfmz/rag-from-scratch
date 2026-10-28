@@ -170,9 +170,10 @@ class TestLoadTestQuestions:
 class TestRunEvaluation:
     """Test the full evaluation run with mocked retriever and generator."""
 
+    @patch("rag.evaluator.generate", return_value="Opened products can be returned within 30 days.")
     @patch("rag.evaluator._call_llm_judge")
     @patch("rag.evaluator._retrieve_for_question")
-    def test_run_evaluation_basic(self, mock_retrieve, mock_judge):
+    def test_run_evaluation_basic(self, mock_retrieve, mock_judge, _mock_generate):
         """Test that run_evaluation produces a results dict with all metrics."""
         # Mock retrieval: returns chunks from expected source
         mock_retrieve.return_value = [

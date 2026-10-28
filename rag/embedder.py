@@ -34,20 +34,10 @@ The response looks like:
   }
 """
 
-import os
 import time
 import requests
-from dotenv import load_dotenv
 
-# 📚 LEARN: load_dotenv() reads the .env file and sets environment variables.
-# This keeps your API key out of source code — NEVER hardcode secrets!
-load_dotenv()
-
-# ── Configuration ──────────────────────────────────────────────
-
-# OpenRouter API configuration
-EMBEDDING_API_URL = os.getenv("EMBEDDING_API_URL", "https://openrouter.ai/api/v1/embeddings")
-EMBEDDING_MODEL = os.getenv("MODEL_EMBEDDING", "text-embedding-v3")
+from rag.llm_config import EMBEDDING_API_URL, EMBEDDING_MODEL, build_headers, get_api_key
 
 # 📚 LEARN: text-embedding-3-large produces 3072-dimensional vectors.
 # That means each chunk becomes a list of 3072 numbers. "3-large" is higher
@@ -66,32 +56,11 @@ RETRY_DELAY_SECONDS = 5
 
 
 def _get_api_key() -> str:
-    """Get API key for OpenRouter embedding endpoint."""
-    api_key = os.getenv("OPENROUTER_API_KEY")
-    if api_key:
-        return api_key
-
-    raise ValueError(
-        "No API key found. Set OPENROUTER_API_KEY"
-    )
+    return get_api_key()
 
 
 def _build_headers(api_key: str | None = None) -> dict:
-    """Build request headers for OpenAI-compatible providers (Qwen/OpenRouter/etc.)."""
-    token = api_key or _get_api_key()
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json",
-    }
-
-    referer = os.getenv("OPENROUTER_HTTP_REFERER")
-    app_name = os.getenv("OPENROUTER_APP_NAME")
-    if referer:
-        headers["HTTP-Referer"] = referer
-    if app_name:
-        headers["X-Title"] = app_name
-
-    return headers
+    return build_headers(api_key)
 
 
 def embed_texts(texts: list[str]) -> list[list[float]]:

@@ -113,7 +113,7 @@ You operate in a loop of: Thought → Action → Observation
    Retrieve document chunks from the knowledge base.
    - query: The search query (string)
    - top_k: Number of chunks to retrieve (integer, default 5)
-   - search_mode: "vector", "keyword", or "hybrid" (default "vector")
+   - search_mode: "vector", "keyword", "hybrid", or "hybrid_graph" (default "vector")
    Example: Action: RequestMoreContext("machine learning overfitting", 5, "vector")
 
 2. **ReformulateQuery(new_query)**

@@ -5,7 +5,7 @@ from fastapi.staticfiles import StaticFiles
 
 from backend.api import router, pipeline, set_startup_sync
 
-app = FastAPI(title="RAG From Scratch API")
+app = FastAPI(title="Local Search RAG API")
 
 # Enable CORS
 app.add_middleware(

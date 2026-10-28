@@ -263,6 +263,7 @@ class BM25:
 def reciprocal_rank_fusion(
     vector_results: list[dict],
     bm25_results: list[dict],
+    *extra_lists: list[dict],
     k: int = 60,
     top_k: int = None,
 ) -> list[dict]:
@@ -305,27 +306,19 @@ def reciprocal_rank_fusion(
         # Use text + source to identify unique chunks
         return f"{source}::{chunk['text'][:100]}"
 
-    # Score vector results by rank
-    for rank, chunk in enumerate(vector_results):
-        key = _chunk_key(chunk)
-        if key not in rrf_scores:
-            rrf_scores[key] = {
-                "text": chunk["text"],
-                "metadata": chunk.get("metadata", {}),
-                "rrf_score": 0.0,
-            }
-        rrf_scores[key]["rrf_score"] += 1.0 / (k + rank + 1)
+    def _accumulate(ranked: list[dict]):
+        for rank, chunk in enumerate(ranked):
+            key = _chunk_key(chunk)
+            if key not in rrf_scores:
+                rrf_scores[key] = {
+                    "text": chunk["text"],
+                    "metadata": chunk.get("metadata", {}),
+                    "rrf_score": 0.0,
+                }
+            rrf_scores[key]["rrf_score"] += 1.0 / (k + rank + 1)
 
-    # Score BM25 results by rank
-    for rank, chunk in enumerate(bm25_results):
-        key = _chunk_key(chunk)
-        if key not in rrf_scores:
-            rrf_scores[key] = {
-                "text": chunk["text"],
-                "metadata": chunk.get("metadata", {}),
-                "rrf_score": 0.0,
-            }
-        rrf_scores[key]["rrf_score"] += 1.0 / (k + rank + 1)
+    for ranked in (vector_results, bm25_results, *extra_lists):
+        _accumulate(ranked)
 
     # Convert to list and sort by RRF score
     results = [

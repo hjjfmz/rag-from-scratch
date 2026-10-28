@@ -17,7 +17,7 @@ from rag.pipeline import RAGPipeline
 
 def main():
     parser = argparse.ArgumentParser(
-        description="🔍 RAG From Scratch — Ask questions about your documents",
+        description="🔍 Local Search RAG — Ask questions about your documents",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -80,9 +80,9 @@ Examples:
     )
     query_parser.add_argument(
         "--search-mode", "-m",
-        choices=["vector", "keyword", "hybrid"],
+        choices=["vector", "keyword", "hybrid", "hybrid_graph"],
         default="vector",
-        help="Search mode: vector (default), keyword (BM25), or hybrid (both)",
+        help="Search mode: vector (default), keyword (BM25), hybrid, or hybrid_graph",
     )
     query_parser.add_argument(
         "--rerank",
@@ -126,7 +126,7 @@ Examples:
     )
     agentic_parser.add_argument(
         "--search-mode", "-m",
-        choices=["vector", "keyword", "hybrid"],
+        choices=["vector", "keyword", "hybrid", "hybrid_graph"],
         default="vector",
         help="Default search mode (default: vector). The agent may switch modes during iterations.",
     )
@@ -164,14 +164,19 @@ Examples:
     )
     eval_parser.add_argument(
         "--search-mode", "-m",
-        choices=["vector", "keyword", "hybrid"],
+        choices=["vector", "keyword", "hybrid", "hybrid_graph"],
         default="vector",
-        help="Search mode: vector (default), keyword (BM25), or hybrid (both)",
+        help="Search mode: vector (default), keyword (BM25), hybrid, or hybrid_graph",
     )
     eval_parser.add_argument(
         "--rerank",
         action="store_true",
         help="Rerank results with LLM for higher precision (slower)",
+    )
+    eval_parser.add_argument(
+        "--compare",
+        action="store_true",
+        help="Compare hybrid and hybrid_graph retrieval precision. Does not generate answers.",
     )
 
     # ── Parse and execute ──────────────────────────────────────
@@ -252,7 +257,14 @@ Examples:
         print(f"🔄 Iterations: {result['iterations']}")
 
     elif args.command == "eval":
-        from rag.evaluator import load_test_questions, run_evaluation, save_results, print_scorecard
+        from rag.evaluator import (
+            compare_hybrid_and_graph,
+            load_test_questions,
+            print_comparison,
+            print_scorecard,
+            run_evaluation,
+            save_results,
+        )
 
         # Auto-ingest if needed
         pipeline = RAGPipeline()
@@ -262,6 +274,18 @@ Examples:
         print(f"📋 Loading test questions from: {args.test_file}")
         questions = load_test_questions(args.test_file)
         print(f"   → {len(questions)} questions loaded\n")
+
+        if args.compare:
+            results = compare_hybrid_and_graph(
+                questions,
+                top_k=args.top_k,
+                threshold=args.threshold,
+            )
+            print_comparison(results)
+            if not results.get("skipped"):
+                filepath = save_results(results)
+                print(f"\n💾 Results saved to: {filepath}")
+            return
 
         # Run evaluation
         results = run_evaluation(

@@ -18,9 +18,11 @@ from datetime import datetime
 from rag.loader import load_document
 from rag.chunker import create_chunks
 from rag.embedder import embed_chunks
-from rag.vector_store import VectorStore
+from rag.vector_store import create_vector_store
 from rag.retriever import Retriever
 from rag.generator import generate_with_sources, build_no_answer_response, generate_chat
+from rag.graph_store import GraphStore, chunk_id_for, graph_path_for
+from rag.graph_extractor import extract_graph
 
 # Default paths for the vector store index
 DEFAULT_INDEX_PATH = "rag_index.json"
@@ -52,7 +54,7 @@ class RAGPipeline:
             chunk_overlap: Overlap between consecutive chunks
             top_k: Number of chunks to retrieve per query
             threshold: Minimum similarity score for retrieved chunks
-            search_mode: "vector", "keyword", or "hybrid" (default: "vector")
+            search_mode: "vector", "keyword", "hybrid", or "hybrid_graph"
             use_reranker: If True, rerank results with LLM (default: False)
         """
         self.index_path = index_path
@@ -64,9 +66,15 @@ class RAGPipeline:
         self.use_reranker = use_reranker
 
         # Load existing index if it exists, otherwise create empty store
-        self.store = VectorStore()
+        self.store = create_vector_store()
+        self.graph = GraphStore()
+        self.graph_path = graph_path_for(index_path)
         if os.path.exists(index_path):
             self.store.load(index_path)
+        elif os.getenv("VECTOR_BACKEND", "json").strip().lower() == "qdrant":
+            self.store.load(index_path)
+        if os.path.exists(self.graph_path):
+            self.graph.load(self.graph_path)
 
     def ingest(self, source: str, save: bool = True) -> int:
         """
@@ -100,6 +108,22 @@ class RAGPipeline:
         )
         print(f"     → {len(chunks)} chunks (avg {sum(len(c['text']) for c in chunks) // max(len(chunks), 1)} chars each)")
 
+        for chunk in chunks:
+            chunk["chunk_id"] = chunk_id_for(chunk.get("source", doc["source"]), chunk.get("chunk_index", 0))
+
+        print("  2️⃣b Extracting entities...")
+        self.graph.drop_source(doc["source"])
+        for chunk in chunks:
+            try:
+                extracted = extract_graph(chunk["text"])
+            except Exception as exc:
+                print(f"     ⚠️  Graph extraction skipped for chunk {chunk['chunk_id']}: {exc}")
+                extracted = {"entities": [], "relations": []}
+            self.graph.add_extraction(
+                extracted["entities"], extracted["relations"], chunk["chunk_id"]
+            )
+        print(f"     → graph has {len(self.graph.nodes)} entities, {len(self.graph.edges)} relations")
+
         # Step 3: Embed the chunks
         print("  3️⃣  Embedding chunks...")
         embedded_chunks = embed_chunks(chunks)
@@ -109,6 +133,7 @@ class RAGPipeline:
         self.store.add_chunks(embedded_chunks)
         if save:
             self.store.save(self.index_path)
+            self.graph.save(self.graph_path)
 
         print(f"  ✅ Done! Store now has {len(self.store)} total chunks.")
         return len(chunks)
@@ -164,6 +189,7 @@ class RAGPipeline:
             threshold=effective_threshold,
             search_mode=effective_search_mode,
             use_reranker=effective_use_reranker,
+            graph_store=getattr(self, "graph", None),
         )
         results = retriever.retrieve(question)
 
@@ -357,16 +383,22 @@ class RAGPipeline:
             }
 
         original_entries = list(self.store.entries)
+        graph_nodes = {name: list(ids) for name, ids in self.graph.nodes.items()}
+        graph_edges = list(self.graph.edges)
         try:
-            self.store.entries = [
+            kept = [
                 e for e in self.store.entries
                 if not self._is_sample_source(e.get("metadata", {}).get("source", ""), sample_dir)
             ]
+            self.store.replace_entries(kept)
+            for source in sample_sources_in_index:
+                self.graph.drop_source(source)
 
             for file_path in files:
                 self.ingest(file_path, save=False)
 
             self.store.save(self.index_path)
+            self.graph.save(self.graph_path)
             return {
                 "changed": True,
                 "status": "reindexed",
@@ -378,7 +410,9 @@ class RAGPipeline:
                 "finished_at": datetime.now().isoformat(),
             }
         except Exception as e:
-            self.store.entries = original_entries
+            self.store.replace_entries(original_entries)
+            self.graph.nodes = graph_nodes
+            self.graph.edges = graph_edges
             return {
                 "changed": True,
                 "status": "error",

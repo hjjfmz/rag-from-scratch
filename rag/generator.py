@@ -26,19 +26,10 @@ With "stream": true, the API sends tokens one at a time, so the user sees
 the answer appear progressively instead of waiting for the full response.
 """
 
-import os
 import json
 import requests
-from dotenv import load_dotenv
 
-load_dotenv()
-
-# ── Configuration ──────────────────────────────────────────────
-
-# OpenRouter API configuration
-CHAT_API_URL = os.getenv("CHAT_API_URL", "https://openrouter.ai/api/v1/chat/completions")
-CHAT_MODEL = os.getenv("MODEL_CHAT", "qwen3-8b")
-JUDGE_MODEL = os.getenv("MODEL_JUDGE", CHAT_MODEL)
+from rag.llm_config import CHAT_API_URL, CHAT_MODEL, JUDGE_MODEL, build_headers, get_api_key
 
 # 📚 LEARN: The system message sets the LLM's behavior. It tells the model
 # to answer ONLY from the provided context and to cite sources. This is
@@ -108,33 +99,11 @@ def build_no_answer_response(
 
 
 def _get_api_key() -> str:
-    """Get API key for OpenRouter endpoint."""
-    api_key = os.getenv("OPENROUTER_API_KEY")
-    if api_key:
-        return api_key
-
-    raise ValueError(
-        "No API key found. Set OPENROUTER_API_KEY"
-    )
+    return get_api_key()
 
 
 def _build_headers(api_key: str | None = None) -> dict:
-    """Build request headers for OpenAI-compatible providers (Qwen/OpenRouter/etc.)."""
-    token = api_key or _get_api_key()
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json",
-    }
-
-    # OpenRouter recommends these headers; they are optional.
-    referer = os.getenv("OPENROUTER_HTTP_REFERER")
-    app_name = os.getenv("OPENROUTER_APP_NAME")
-    if referer:
-        headers["HTTP-Referer"] = referer
-    if app_name:
-        headers["X-Title"] = app_name
-
-    return headers
+    return build_headers(api_key)
 
 
 def build_prompt(query: str, context_chunks: list[dict]) -> list[dict]:

@@ -40,9 +40,10 @@ import re
 from datetime import datetime
 
 from rag.retriever import Retriever
-from rag.vector_store import VectorStore
+from rag.vector_store import create_vector_store
 from rag.generator import generate, build_prompt
 from rag.pipeline import DEFAULT_INDEX_PATH
+from rag.graph_store import GraphStore, graph_path_for
 
 
 # ── Test Question Loading ─────────────────────────────────────
@@ -225,11 +226,24 @@ def _retrieve_for_question(question: str, top_k: int = 5, threshold: float = 0.3
     This is a helper that creates a fresh retriever for each question.
     Separated out so it can be easily mocked in tests.
     """
-    store = VectorStore()
-    if os.path.exists(DEFAULT_INDEX_PATH):
+    store = create_vector_store()
+    backend = os.getenv("VECTOR_BACKEND", "json").strip().lower() or "json"
+    if backend == "qdrant" or os.path.exists(DEFAULT_INDEX_PATH):
         store.load(DEFAULT_INDEX_PATH)
 
-    retriever = Retriever(store, top_k=top_k, threshold=threshold, search_mode=search_mode, use_reranker=use_reranker)
+    graph = None
+    if search_mode == "hybrid_graph":
+        graph = GraphStore()
+        graph.load(graph_path_for(DEFAULT_INDEX_PATH))
+
+    retriever = Retriever(
+        store,
+        top_k=top_k,
+        threshold=threshold,
+        search_mode=search_mode,
+        use_reranker=use_reranker,
+        graph_store=graph,
+    )
     return retriever.retrieve(question)
 
 
@@ -433,6 +447,95 @@ def run_evaluation(
             "timestamp": datetime.now().isoformat(),
         },
     }
+
+
+def summarize_retrieval_comparison(rows: list[dict]) -> dict:
+    """Average source-hit precision for hybrid and hybrid_graph. None means the question has no expected source."""
+
+    def _avg(key: str):
+        values = [row[key] for row in rows if row.get(key) is not None]
+        if not values:
+            return None
+        return sum(values) / len(values)
+
+    return {
+        "num_questions": len(rows),
+        "hybrid_precision": _avg("hybrid_precision"),
+        "hybrid_graph_precision": _avg("hybrid_graph_precision"),
+        "individual": rows,
+    }
+
+
+def index_has_chunks() -> bool:
+    store = create_vector_store()
+    backend = os.getenv("VECTOR_BACKEND", "json").strip().lower() or "json"
+    if backend == "qdrant" or os.path.exists(DEFAULT_INDEX_PATH):
+        store.load(DEFAULT_INDEX_PATH)
+    return len(store) > 0
+
+
+def compare_hybrid_and_graph(
+    test_questions: list[dict],
+    top_k: int = 5,
+    threshold: float = 0.3,
+) -> dict:
+    """Compare hybrid and hybrid_graph on retrieval precision only.
+
+    This does not generate answers or call the judge. If the index is empty,
+    it returns skipped=True and does not invent scores.
+    """
+    if not index_has_chunks():
+        return {
+            "skipped": True,
+            "reason": "Index is empty. Ingest documents before comparing hybrid and hybrid_graph.",
+            "num_questions": len(test_questions),
+            "hybrid_precision": None,
+            "hybrid_graph_precision": None,
+            "individual": [],
+        }
+
+    rows = []
+    total = len(test_questions)
+    for i, item in enumerate(test_questions):
+        question = item["question"]
+        expected = item.get("expected_source")
+        print(f"\n[{i + 1}/{total}] {question}")
+        hybrid = _retrieve_for_question(
+            question, top_k=top_k, threshold=threshold, search_mode="hybrid"
+        )
+        graphed = _retrieve_for_question(
+            question, top_k=top_k, threshold=threshold, search_mode="hybrid_graph"
+        )
+        rows.append({
+            "question": question,
+            "expected_source": expected,
+            "hybrid_precision": compute_retrieval_precision(hybrid, expected),
+            "hybrid_graph_precision": compute_retrieval_precision(graphed, expected),
+        })
+
+    summary = summarize_retrieval_comparison(rows)
+    summary["skipped"] = False
+    summary["settings"] = {
+        "top_k": top_k,
+        "threshold": threshold,
+        "modes": ["hybrid", "hybrid_graph"],
+        "timestamp": datetime.now().isoformat(),
+    }
+    return summary
+
+
+def print_comparison(results: dict):
+    if results.get("skipped"):
+        print(results.get("reason", "Comparison skipped."))
+        return
+
+    def _show(value):
+        return "n/a" if value is None else f"{value:.3f}"
+
+    print("\nRetrieval comparison (source precision, no answer model)")
+    print(f"  questions: {results['num_questions']}")
+    print(f"  hybrid: {_show(results.get('hybrid_precision'))}")
+    print(f"  hybrid+graph: {_show(results.get('hybrid_graph_precision'))}")
 
 
 def _safe_avg(scores: list[float]) -> float:

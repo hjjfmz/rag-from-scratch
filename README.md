@@ -1,4 +1,4 @@
-# RAG From Scratch
+# Local Search RAG
 
 用 Python 从零实现的 RAG 系统：不依赖 LangChain、不依赖向量数据库 SDK、不依赖 OpenAI SDK；直接用 HTTP 调 OpenRouter（OpenAI-compatible）接口，便于理解 RAG 的每个环节，并提供 CLI + Web UI 便于测试与迭代。
 
@@ -91,9 +91,10 @@ User Question
 # 1) 安装依赖
 pip install -r requirements.txt
 
-# 2) 配置 OpenRouter
+# 2) 配置任意 OpenAI 兼容服务
 copy .env.example .env
-# 编辑 .env：设置 OPENROUTER_API_KEY=...
+# 编辑 .env：设置 LLM_API_KEY，以及 CHAT_API_URL / EMBEDDING_API_URL / 模型名
+# 向量库默认 VECTOR_BACKEND=json。要用 Qdrant 时改为 qdrant，并先启动本地服务。
 
 # 3) 放入你的文档（可选）
 mkdir sample_data
@@ -105,11 +106,16 @@ python cli.py query "这份文档主要讲什么？"
 
 ## 配置说明（.env）
 
-`.env.example` 已给出所有字段，最少需要：
+`.env.example` 已给出字段，最少需要：
 
-- `OPENROUTER_API_KEY`
+- `LLM_API_KEY`（也接受 `OPENAI_API_KEY` 或 `OPENROUTER_API_KEY`）
 - `CHAT_API_URL` / `EMBEDDING_API_URL`
 - `MODEL_CHAT` / `MODEL_JUDGE` / `MODEL_EMBEDDING`
+
+向量库：
+
+- `VECTOR_BACKEND=json`：本地 JSON，精确余弦，用来对照检索在算什么
+- `VECTOR_BACKEND=qdrant`：同一套检索接口接到 Qdrant（默认 `http://localhost:6333`，集合 `rag_chunks`）
 
 ## CLI 用法
 
@@ -138,9 +144,10 @@ python cli.py query "退货政策是什么？" --verbose
 # 控制检索参数
 python cli.py query "退货政策是什么？" --top-k 3 --threshold 0.4
 
-# 检索模式：vector / keyword / hybrid
+# 检索模式：vector / keyword / hybrid / hybrid_graph
 python cli.py query "HEART method customer service" --search-mode keyword
 python cli.py query "退货政策是什么？" --search-mode hybrid
+python cli.py query "退货政策是什么？" --search-mode hybrid_graph
 
 # hybrid + rerank（更准但更慢）
 python cli.py query "退货政策是什么？" --search-mode hybrid --rerank
@@ -182,7 +189,10 @@ python cli.py eval
 # 对比检索模式
 python cli.py eval --search-mode vector
 python cli.py eval --search-mode hybrid
-python cli.py eval --search-mode hybrid --rerank
+python cli.py eval --search-mode hybrid_graph
+
+# 只对比 hybrid 与 hybrid+graph 的检索来源命中，不生成答案
+python cli.py eval --compare
 
 # 输出更详细的逐题信息
 python cli.py eval --verbose

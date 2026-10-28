@@ -33,6 +33,8 @@ from rag.embedder import embed_query
 from rag.vector_store import VectorStore
 from rag.bm25 import BM25, reciprocal_rank_fusion
 from rag.reranker import rerank
+from rag.graph_extractor import extract_entity_names
+from rag.graph_store import GraphStore, chunk_id_for
 
 
 class Retriever:
@@ -58,26 +60,29 @@ class Retriever:
         threshold: float = 0.0,
         search_mode: str = "vector",
         use_reranker: bool = False,
+        graph_store: GraphStore | None = None,
     ):
         """
         Args:
             vector_store: A populated VectorStore instance
             top_k: Maximum number of chunks to retrieve (default: 5)
             threshold: Minimum similarity score to include (default: 0.0)
-            search_mode: "vector", "keyword", or "hybrid" (default: "vector")
+            search_mode: "vector", "keyword", "hybrid", or "hybrid_graph"
             use_reranker: If True, rerank results with LLM (default: False)
+            graph_store: Entity graph used by hybrid_graph. Ignored otherwise.
         """
         self.vector_store = vector_store
         self.top_k = top_k
         self.threshold = threshold
         self.search_mode = search_mode
         self.use_reranker = use_reranker
+        self.graph_store = graph_store
 
         # 📚 LEARN: Build a BM25 index from the same data in the vector store.
         # This lets us do keyword search alongside vector search without
         # storing the data twice — BM25 just needs the text and metadata.
         self.bm25 = BM25()
-        if search_mode in ("keyword", "hybrid") and vector_store.entries:
+        if search_mode in ("keyword", "hybrid", "hybrid_graph") and vector_store.entries:
             bm25_docs = [
                 {"text": e["text"], "metadata": e["metadata"]}
                 for e in vector_store.entries
@@ -139,7 +144,8 @@ class Retriever:
               "Please delete rag_index.json and re-ingest documents."
             )
 
-        retrieve_k = self.top_k * 4 if (self.search_mode == "hybrid" or self.use_reranker) else self.top_k
+        wide = self.search_mode in ("hybrid", "hybrid_graph") or self.use_reranker
+        retrieve_k = self.top_k * 4 if wide else self.top_k
         vector_results = self.vector_store.search(
             query_vector=query_vector,
             top_k=retrieve_k,
@@ -152,20 +158,66 @@ class Retriever:
                   else "  ⚠️  No relevant chunks found!")
             return self._maybe_rerank(query, vector_results)
 
-        # Hybrid mode: also run BM25 and merge with RRF
+        # Hybrid mode: also run BM25 and merge with RRF.
+        # hybrid_graph adds a third ranked list: 1-hop chunks from the entity graph.
         bm25_results = self.bm25.search(query, top_k=self.top_k * 4)
+        graph_results = self._graph_results(query) if self.search_mode == "hybrid_graph" else []
+        fuse_k = self.top_k * 4 if self.use_reranker else self.top_k
+        if graph_results:
+            fused = reciprocal_rank_fusion(
+                vector_results, bm25_results, graph_results, top_k=fuse_k
+            )
+        else:
+            fused = reciprocal_rank_fusion(
+                vector_results, bm25_results, top_k=fuse_k
+            )
 
-        # 📚 LEARN: Reciprocal Rank Fusion merges the two ranked lists.
-        # Chunks that appear in BOTH lists get the highest scores.
-        fused = reciprocal_rank_fusion(
-            vector_results, bm25_results, top_k=self.top_k * 4 if self.use_reranker else self.top_k
-        )
-
-        print(f"  📄 Found {len(fused)} relevant chunks via hybrid search "
+        label = "hybrid+graph" if self.search_mode == "hybrid_graph" else "hybrid"
+        print(f"  📄 Found {len(fused)} relevant chunks via {label} search "
               f"(vector: {len(vector_results)}, BM25: {len(bm25_results)}, "
+              f"graph: {len(graph_results)}, "
               f"top RRF: {fused[0]['score']:.4f})" if fused
               else "  ⚠️  No relevant chunks found!")
         return self._maybe_rerank(query, fused)
+
+    def _graph_results(self, query: str) -> list[dict]:
+        """Ranked chunks for entities mentioned in the query and their neighbors.
+
+        An empty graph falls back to plain hybrid: this returns [] and the
+        caller fuses only the vector and BM25 lists.
+        """
+        graph = self.graph_store
+        if graph is None or not graph.nodes:
+            return []
+
+        names: list[str] = []
+        seen: set[str] = set()
+        for name in list(graph.match_names(query)) + extract_entity_names(query):
+            key = name.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            names.append(name)
+
+        by_id: dict[str, dict] = {}
+        for entry in self.vector_store.entries:
+            metadata = entry.get("metadata") or {}
+            chunk_id = metadata.get("chunk_id") or chunk_id_for(
+                metadata.get("source", ""), metadata.get("chunk_index", -1)
+            )
+            by_id.setdefault(chunk_id, entry)
+
+        ranked = []
+        for chunk_id in graph.one_hop_chunk_ids(names):
+            entry = by_id.get(chunk_id)
+            if entry is None:
+                continue
+            ranked.append({
+                "text": entry["text"],
+                "metadata": entry.get("metadata") or {},
+                "score": 0.0,
+            })
+        return ranked
 
     def _maybe_rerank(self, query: str, results: list[dict]) -> list[dict]:
         """
