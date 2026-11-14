@@ -1,2 +1,1 @@
-# RAG From Scratch — A learning-focused RAG implementation
-# Each module in this package implements one stage of the RAG pipeline.
+"""Local knowledge ingestion, graph retrieval and grounded question answering."""

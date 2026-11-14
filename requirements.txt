@@ -1,4 +1,4 @@
-requests          # HTTP calls to OpenAI API (no SDK — we learn the raw API)
+requests          # Compatible model HTTP services
 python-dotenv     # Load API key from .env file
 PyPDF2            # PDF text extraction
 beautifulsoup4    # HTML → plain text for web scraping

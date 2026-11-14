@@ -1,285 +1,181 @@
-"""
-📚 LEARN: CLI — Command-Line Interface
-========================================
-This is how users interact with the RAG system from the terminal.
-We use Python's built-in argparse module (no external dependencies).
-
-Usage:
-  python cli.py ingest --source <file_or_url>   Ingest a document
-  python cli.py query "your question"            Ask a question
-  python cli.py list                             List indexed documents
-"""
-
+"""Personal local knowledge CLI. Web continues to use its separate legacy pipeline."""
 import argparse
+from contextlib import redirect_stdout
+import json
+import os
+from pathlib import Path
 import sys
-from rag.pipeline import RAGPipeline
+
+from dotenv import load_dotenv
+
+ROOT = Path(__file__).resolve().parent
 
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="🔍 RAG From Scratch — Ask questions about your documents",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  python cli.py ingest --source sample_data/sample.md
-  python cli.py ingest --source https://example.com
-  python cli.py query "What is machine learning?"
-  python cli.py query "What is overfitting?" --verbose
-  python cli.py list
-        """,
-    )
+class CLIParser(argparse.ArgumentParser):
+    def error(self, message):
+        raise ValueError(message)
 
-    subparsers = parser.add_subparsers(dest="command", help="Available commands")
 
-    # ── Ingest command ─────────────────────────────────────────
-    ingest_parser = subparsers.add_parser(
-        "ingest", help="Ingest a document (PDF, text, or URL)"
-    )
-    ingest_parser.add_argument(
-        "--source", "-s",
-        required=True,
-        help="Path to a file or URL to ingest",
-    )
-    ingest_parser.add_argument(
-        "--chunk-size",
-        type=int,
-        default=500,
-        help="Target chunk size in characters (default: 500)",
-    )
-    ingest_parser.add_argument(
-        "--overlap",
-        type=int,
-        default=100,
-        help="Overlap between chunks in characters (default: 100)",
-    )
+def _common(parser, child=False):
+    default = argparse.SUPPRESS if child else None
+    parser.add_argument("--data-dir", default=default, help="SQLite/cache directory (default: project .runtime/knowledge or .runtime/offline)")
+    parser.add_argument("--offline", action="store_true", default=argparse.SUPPRESS if child else False,
+                        help="Explicit heuristic extraction and lexical vectors; no model service")
+    parser.add_argument("--json", action="store_true", default=argparse.SUPPRESS if child else False, help="Machine-readable stdout")
 
-    # ── Query command ──────────────────────────────────────────
-    query_parser = subparsers.add_parser(
-        "query", help="Ask a question about your documents"
-    )
-    query_parser.add_argument(
-        "question",
-        help="Your question in natural language",
-    )
-    query_parser.add_argument(
-        "--top-k", "-k",
-        type=int,
-        default=5,
-        help="Number of chunks to retrieve (default: 5)",
-    )
-    query_parser.add_argument(
-        "--threshold", "-t",
-        type=float,
-        default=0.3,
-        help="Minimum similarity score (default: 0.3)",
-    )
-    query_parser.add_argument(
-        "--verbose", "-v",
-        action="store_true",
-        help="Show retrieved chunks before the answer",
-    )
-    query_parser.add_argument(
-        "--search-mode", "-m",
-        choices=["vector", "keyword", "hybrid"],
-        default="vector",
-        help="Search mode: vector (default), keyword (BM25), or hybrid (both)",
-    )
-    query_parser.add_argument(
-        "--rerank",
-        action="store_true",
-        help="Rerank results with LLM for higher precision (slower)",
-    )
 
-    # ── List command ───────────────────────────────────────────
-    subparsers.add_parser("list", help="List all indexed documents")
+def build_parser():
+    from rag.graph_retrieval import MODES
+    parser = CLIParser(description="Local Knowledge — cross-file questions with local/global graph evidence")
+    _common(parser)
+    commands = parser.add_subparsers(dest="command", required=True, parser_class=CLIParser)
+    def command(name, help):
+        child = commands.add_parser(name, help=help)
+        _common(child, child=True)
+        return child
+    def retrieval(child):
+        child.add_argument("--search-mode", "-m", choices=MODES, default="hybrid_graph")
+        child.add_argument("--top-k", "-k", type=int, default=5)
+        child.add_argument("--threshold", "-t", type=float, default=.25)
+        child.add_argument("--rerank", action="store_true")
+        child.add_argument("--verbose", "-v", action="store_true")
+    ingest = command("ingest", "Atomically index/replace a document, including triples")
+    ingest.add_argument("--source", "-s", required=True)
+    ingest.add_argument("--chunk-size", type=int, default=900)
+    ingest.add_argument("--overlap", type=int, default=120)
+    ingest.add_argument("--workers", type=int, default=4)
+    ingest.add_argument("--force", action="store_true", help="Rebuild graph and embeddings for this source")
+    sync = command("sync", "Content-aware directory sync")
+    sync.add_argument("--source", "-s", required=True)
+    sync.add_argument("--force", action="store_true")
+    sync.add_argument("--prune", action="store_true", help="Delete indexed local sources missing from this directory")
+    for name in ("query", "search", "agentic-query"):
+        child = command(name, "Grounded answer" if name == "query" else "Inspect evidence" if name == "search" else "Bounded multi-query graph agent")
+        child.add_argument("question")
+        retrieval(child)
+        if name == "agentic-query":
+            child.add_argument("--max-iterations", "-i", type=int, default=3)
+    command("list", "List indexed sources and revisions")
+    delete = command("delete", "Delete a source and its graph/vector evidence")
+    delete.add_argument("--source", "-s", required=True)
+    graph = command("graph", "Inspect/export evidence triples")
+    graph.add_argument("--output", help="Optional JSON export file")
+    doctor = command("doctor", "Check storage, configuration and model identity")
+    doctor.add_argument("--live", action="store_true", help="Actually call embedding/chat endpoints (may incur cost)")
+    evaluation = command("eval", "Compare source retrieval, graph evidence and latency")
+    evaluation.add_argument("--test-file", required=True, help="Your independently labeled JSON question file")
+    evaluation.add_argument("--modes", nargs="+", choices=MODES, default=["hybrid", "local", "global", "hybrid_graph"])
+    evaluation.add_argument("--search-mode", "-m", choices=MODES, help="Evaluate just this mode")
+    evaluation.add_argument("--top-k", "-k", type=int, default=5)
+    evaluation.add_argument("--threshold", "-t", type=float, default=.25)
+    evaluation.add_argument("--output")
+    evaluation.add_argument("--compare", action="store_true", help="Compare hybrid and hybrid_graph")
+    return parser
 
-    # ── Agentic Query command ─────────────────────────────────
-    agentic_parser = subparsers.add_parser(
-        "agentic-query", help="Ask a question using the ReAct agent (iterative retrieval)"
-    )
-    agentic_parser.add_argument(
-        "question",
-        help="Your question in natural language",
-    )
-    agentic_parser.add_argument(
-        "--max-iterations", "-i",
-        type=int,
-        default=5,
-        help="Maximum ReAct loop iterations (default: 5)",
-    )
-    agentic_parser.add_argument(
-        "--top-k", "-k",
-        type=int,
-        default=5,
-        help="Default number of chunks to retrieve per iteration (default: 5)",
-    )
-    agentic_parser.add_argument(
-        "--threshold", "-t",
-        type=float,
-        default=0.3,
-        help="Minimum similarity score (default: 0.3)",
-    )
-    agentic_parser.add_argument(
-        "--verbose", "-v",
-        action="store_true",
-        help="Show the full Thought/Action/Observation reasoning trace",
-    )
-    agentic_parser.add_argument(
-        "--search-mode", "-m",
-        choices=["vector", "keyword", "hybrid"],
-        default="vector",
-        help="Default search mode (default: vector). The agent may switch modes during iterations.",
-    )
-    agentic_parser.add_argument(
-        "--rerank",
-        action="store_true",
-        help="Rerank results with LLM for higher precision (slower)",
-    )
 
-    # ── Eval command ───────────────────────────────────────────
-    eval_parser = subparsers.add_parser(
-        "eval", help="Run evaluation against test questions"
-    )
-    eval_parser.add_argument(
-        "--test-file",
-        default="eval/test_questions.json",
-        help="Path to test questions JSON (default: eval/test_questions.json)",
-    )
-    eval_parser.add_argument(
-        "--top-k", "-k",
-        type=int,
-        default=5,
-        help="Number of chunks to retrieve (default: 5)",
-    )
-    eval_parser.add_argument(
-        "--threshold", "-t",
-        type=float,
-        default=0.3,
-        help="Minimum similarity score (default: 0.3)",
-    )
-    eval_parser.add_argument(
-        "--verbose", "-v",
-        action="store_true",
-        help="Show detailed results per question",
-    )
-    eval_parser.add_argument(
-        "--search-mode", "-m",
-        choices=["vector", "keyword", "hybrid"],
-        default="vector",
-        help="Search mode: vector (default), keyword (BM25), or hybrid (both)",
-    )
-    eval_parser.add_argument(
-        "--rerank",
-        action="store_true",
-        help="Rerank results with LLM for higher precision (slower)",
-    )
+def _write_json(path, value):
+    path = Path(path).resolve()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp = path.with_name(path.name + ".tmp")
+    temp.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(temp, path)
+    return str(path)
 
-    # ── Parse and execute ──────────────────────────────────────
-    args = parser.parse_args()
 
-    if not args.command:
-        parser.print_help()
-        sys.exit(1)
+def _questions(path):
+    value = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(value, list):
+        raise ValueError("Evaluation file must be a JSON question list")
+    return value
 
+
+def execute(args):
+    from rag.graph_service import GraphService
+    from rag.model_client import ModelClient, ModelError
+    offline = args.offline
+    data_dir = Path(args.data_dir or ROOT / ".runtime" / ("offline" if offline else "knowledge")).resolve()
+    client = None
+    if args.command not in ("list", "delete", "graph"):
+        try:
+            client = ModelClient(offline=offline, cache_path=data_dir / "model-cache.sqlite3")
+        except ModelError:
+            if args.command != "doctor":
+                raise
+    service = GraphService(data_dir, client, chunk_size=getattr(args, "chunk_size", 900),
+                           overlap=getattr(args, "overlap", 120), workers=getattr(args, "workers", 4))
     if args.command == "ingest":
-        pipeline = RAGPipeline(
-            chunk_size=args.chunk_size,
-            chunk_overlap=args.overlap,
-        )
-        pipeline.ingest(args.source)
-
-    elif args.command == "query":
-        pipeline = RAGPipeline(
-            top_k=args.top_k,
-            threshold=args.threshold,
-            search_mode=args.search_mode,
-            use_reranker=args.rerank,
-        )
-        # Auto-ingest sample documents on first run
-        pipeline.auto_ingest()
-        result = pipeline.query(args.question, verbose=args.verbose)
-
-        status = result.get("status", "")
-        guidance = result.get("user_guidance", "")
-        quality = result.get("retrieval_quality", {})
-
-        if guidance:
-            print(f"\n💡 {guidance}")
-        if quality:
-            top = quality.get("top_score")
-            avg = quality.get("avg_top3_score")
-            if top is not None and avg is not None:
-                print(f"📊 Retrieval quality: top_score={top:.3f}, avg_top3={avg:.3f}")
-
-        # Show sources
-        if result["sources"]:
-            print(f"\n📚 Sources: {', '.join(result['sources'])}")
-
-    elif args.command == "list":
-        pipeline = RAGPipeline()
-        # Auto-ingest sample documents on first run
-        pipeline.auto_ingest()
-        sources = pipeline.list_documents()
-        if sources:
-            print("📚 Indexed documents:")
-            for s in sources:
-                print(f"  • {s}")
+        return service.ingest(args.source, force=args.force), 0
+    if args.command == "sync":
+        result = service.sync(args.source, prune=args.prune, force=args.force)
+        return result, int(bool(result["errors"]))
+    if args.command in ("query", "search", "agentic-query"):
+        options = {"mode": args.search_mode, "top_k": args.top_k, "threshold": args.threshold, "rerank": args.rerank}
+        if args.command == "agentic-query":
+            result = service.agentic_query(args.question, max_iterations=args.max_iterations, **options)
         else:
-            print("No documents indexed yet. Run 'ingest' first.")
+            result = getattr(service, args.command)(args.question, **options)
+        return result, 0
+    if args.command == "list":
+        return {"sources": service.list_sources(), "data_dir": str(data_dir)}, 0
+    if args.command == "delete":
+        return service.delete(args.source), 0
+    if args.command == "graph":
+        result = service.graph()
+        if args.output:
+            result["export_path"] = _write_json(args.output, result)
+        return result, 0
+    if args.command == "doctor":
+        result = service.doctor()
+        if args.live:
+            if client is None:
+                raise ValueError("Configure a model provider before --live verification")
+            client.embed(["Model endpoint connectivity check"])
+            client.extract("Service routes to Pod.")
+            result["provider"] = {**client.health(), "network_verified": not offline}
+        return result, int(not (result["storage"]["ok"] and result["provider"]["configured"] and result["model_compatible"]))
+    if args.command == "eval":
+        modes = [args.search_mode] if args.search_mode else (["hybrid", "hybrid_graph"] if args.compare else args.modes)
+        result = service.evaluate(_questions(args.test_file), modes=modes, top_k=args.top_k, threshold=args.threshold)
+        output = args.output or data_dir / "evaluation.json"
+        result["output_path"] = _write_json(output, result)
+        return result, 0
+    raise ValueError("Unknown command")
 
-    elif args.command == "agentic-query":
-        from rag.agentic_pipeline import AgenticRAGPipeline
 
-        pipeline = AgenticRAGPipeline(
-            max_iterations=args.max_iterations,
-            top_k=args.top_k,
-            threshold=args.threshold,
-            search_mode=args.search_mode,
-            use_reranker=args.rerank,
-        )
-        # Auto-ingest sample documents on first run
-        pipeline.auto_ingest()
-        result = pipeline.query(args.question, verbose=args.verbose)
-
-        guidance = result.get("user_guidance", "")
-
-        if guidance:
-            print(f"\n💡 {guidance}")
-
-        # Show sources
-        if result["sources"]:
-            print(f"\n📚 Sources: {', '.join(result['sources'])}")
-        print(f"🔄 Iterations: {result['iterations']}")
-
-    elif args.command == "eval":
-        from rag.evaluator import load_test_questions, run_evaluation, save_results, print_scorecard
-
-        # Auto-ingest if needed
-        pipeline = RAGPipeline()
-        pipeline.auto_ingest()
-
-        # Load test questions
-        print(f"📋 Loading test questions from: {args.test_file}")
-        questions = load_test_questions(args.test_file)
-        print(f"   → {len(questions)} questions loaded\n")
-
-        # Run evaluation
-        results = run_evaluation(
-            questions,
-            top_k=args.top_k,
-            threshold=args.threshold,
-            verbose=args.verbose,
-            search_mode=args.search_mode,
-            use_reranker=args.rerank,
-        )
-
-        # Print scorecard
-        print_scorecard(results)
-
-        # Save results
-        filepath = save_results(results)
-        print(f"\n💾 Results saved to: {filepath}")
+def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8")
+    load_dotenv(Path(os.getenv("RAG_ENV_FILE", str(ROOT / ".env"))), override=False)
+    json_output = "--json" in argv
+    try:
+        args = build_parser().parse_args(argv)
+        # Existing parsers print progress; JSON stdout is exclusively the final result.
+        with redirect_stdout(sys.stderr):
+            result, exit_code = execute(args)
+        if json_output:
+            print(json.dumps(result, ensure_ascii=False, allow_nan=False))
+        elif "answer" in result:
+            print(result["answer"])
+            for context in result["chunks_used"]:
+                print(f"[{context['citation_id']}] {context['metadata']['source']}")
+            if getattr(args, "verbose", False):
+                print(json.dumps(result["retrieval_trace"], ensure_ascii=False, indent=2))
+        else:
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+        return exit_code
+    except KeyboardInterrupt:
+        message, exit_code = "Interrupted; already committed sources remain intact", 130
+    except Exception as exc:
+        message, exit_code = str(exc), 1
+    if json_output:
+        print(json.dumps({"status": "error", "error": message}, ensure_ascii=False))
+    else:
+        print(f"Error: {message}", file=sys.stderr)
+    return exit_code
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

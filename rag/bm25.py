@@ -91,6 +91,9 @@ def tokenize(text: str) -> list[str]:
 
     # Lowercase and split on non-alphanumeric characters
     words = re.findall(r"[a-z0-9]+", text.lower())
+    # Overlapping CJK bigrams allow partial Chinese keyword matches without a language-model dependency.
+    for run in re.findall(r"[\u3400-\u9fff]+", text):
+        words.extend([run] if len(run) == 1 else [run[i:i+2] for i in range(len(run)-1)])
 
     # Remove stopwords
     return [w for w in words if w not in STOPWORDS]
