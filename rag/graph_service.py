@@ -1,4 +1,12 @@
-"""Single-node CLI application service: atomic indexing, dual-level retrieval and grounded answers."""
+"""Application service: atomic indexing, dual-level retrieval and grounded answers.
+
+Storage modes share one retrieval path:
+  local    — SQLite adapter recalls vectors by exact in-process cosine scan
+  services — Qdrant recalls bounded candidate IDs; PostgreSQL hydrates them
+The retriever receives recall candidates plus graph neighbors. Semantic and
+keyword recall have windows; catalog scans and graph expansion still scale
+with the corpus, so this is not a hard bound on all query work.
+"""
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 import hashlib
@@ -10,12 +18,19 @@ import os
 from pathlib import Path
 import re
 import time
+from uuid import uuid4
 
 from PyPDF2 import PdfReader
 
 from rag.text_chunks import split_chunks
-from rag.graph_retrieval import DualLevelRetriever, canonical, diverse_contexts, source_rounds
+from rag.graph_retrieval import (DualLevelRetriever, _name_match, _overlap, canonical,
+                                 diverse_contexts, source_rounds, tokens)
+from rag.bm25 import idf_for
+from rag.cache import cache_key
 from rag.knowledge_store import KnowledgeStore
+
+KEYWORD_WINDOW = 500   # candidate window for BM25 pre-recall from the term tables
+RECALL_CAP = 1000      # safety ceiling for one semantic recall arm
 
 
 def source_key(source):
@@ -48,20 +63,120 @@ def read_document(source, limit=16 * 1024 * 1024):
     return text
 
 
+def index_terms(text):
+    """Exact token stream the persistent BM25 index scores (graph tokens at the BM25 boundary)."""
+    from rag.bm25 import tokenize
+    return tokenize(" ".join(tokens(text)))
+
+
 class GraphService:
-    def __init__(self, data_dir, client, chunk_size=900, overlap=120, workers=4):
+    def __init__(self, data_dir=None, client=None, *, store=None, qdrant=None, cache=None,
+                 chunk_size=900, overlap=120, workers=4):
         if not 128 <= chunk_size <= 6000 or not 0 <= overlap < chunk_size or not 1 <= workers <= 8:
             raise ValueError("chunk_size must be 128..6000, overlap < chunk_size, workers 1..8")
-        self.data_dir = Path(data_dir).resolve()
+        self.data_dir = Path(data_dir).resolve() if data_dir else None
         self.client = client
         self.chunk_size, self.overlap, self.workers = chunk_size, overlap, workers
-        self.store = KnowledgeStore(self.data_dir / "knowledge.sqlite3")
+        self.store = store if store is not None else KnowledgeStore(self.data_dir / "knowledge.sqlite3")
+        self.qdrant = qdrant
+        self.cache = cache
+        self._pool = None
 
-    def _snapshot(self):
-        snapshot = self.store.records()
-        if snapshot["sources"] and snapshot["fingerprint"] != self.client.fingerprint:
+    # ── bounded snapshot: what the retriever is allowed to see ──
+
+    def _vector_recall(self, kind, vector, floor):
+        if self.qdrant is not None:
+            return self.qdrant.query(kind, vector, limit=RECALL_CAP, floor=floor)
+        method = {"chunks": "vector_candidates", "entities": "entity_vector_candidates",
+                  "relations": "relation_vector_candidates"}[kind]
+        return getattr(self.store, method)(vector, floor=floor, limit=RECALL_CAP)
+
+    def _bounded_snapshot(self, question, mode, top_k, threshold, anchor=None):
+        """Candidate snapshot = bounded recall windows + one graph hop.
+
+        `anchor` pins per-source versions (an agentic run shares one anchor), so a
+        source replaced mid-run stays invisible to later steps instead of mixing
+        versions. A single query anchors itself: sources changing during assembly
+        are dropped at the end, never half-visible.
+        """
+        generations = self.store.generations()
+        anchor = dict(anchor) if anchor is not None else \
+            {row["source"]: row["generation"] for row in generations}
+        sources = self.store.list_sources()
+        fingerprint = self.store.fingerprint()
+        if sources and fingerprint != self.client.fingerprint:
             raise ValueError("Index model fingerprint differs. Select the original model/--offline setting or a fresh --data-dir.")
+        snapshot = {"sources": sources, "chunks": [], "entities": [], "relations": [],
+                    "fingerprint": fingerprint, "bm25_stats": None}
+        graph_mode = mode in ("local", "global", "hybrid_graph")
+        keywords = self.client.keywords(question) if graph_mode else {"low_level": [], "high_level": []}
+        query_vector = self.client.embed([question])[0] if mode != "keyword" else None
+
+        candidate_ids = set()
+        if mode in ("vector", "hybrid", "hybrid_graph") and query_vector is not None:
+            candidate_ids.update(cid for cid, _ in self._vector_recall("chunks", query_vector, threshold))
+        query_terms = []
+        if mode in ("keyword", "hybrid", "hybrid_graph"):
+            query_terms = index_terms(question)
+            stats_n, _ = self.store.bm25_corpus()
+            if stats_n == 0 and self.store.stats()["chunks"]:
+                # Store built before term persistence: fall back to the full id list, local window stats.
+                candidate_ids.update(self.store.all_chunk_ids())
+            else:
+                candidate_ids.update(self.store.chunk_ids_with_terms(sorted(set(query_terms)), limit=KEYWORD_WINDOW))
+
+        seed_entities, relation_ids = [], set()
+        if graph_mode:
+            if mode in ("local", "hybrid_graph") and query_vector is not None:
+                names = " ".join([question] + keywords.get("low_level", []))
+                matched = {e["id"] for e in self.store.entity_catalog() if _name_match(e["name"], names)}
+                semantic = {cid for cid, _ in self._vector_recall("entities", query_vector, max(threshold, .30))}
+                seed_entities = self.store.fetch_entities(matched | semantic)
+            if mode in ("global", "hybrid_graph"):
+                theme = " ".join(keywords.get("high_level", [])) or question
+                theme_vector = self.client.embed([theme])[0] if theme != question else query_vector
+                overlap_ids = {r["id"] for r in self.store.relation_catalog()
+                               if _overlap(theme, r["description"] + " " + " ".join(r["keywords"])
+                                           + " " + r["relation"]) > 0}
+                semantic_ids = {cid for cid, _ in self._vector_recall("relations", theme_vector, max(threshold, .30))}
+                relation_ids |= overlap_ids | semantic_ids
+            if seed_entities:
+                seed_keys = {e["key"] for e in seed_entities}
+                relation_ids |= {r["id"] for r in self.store.fetch_relations_by_keys(seed_keys)}
+        relations = self.store.fetch_relations(relation_ids) if relation_ids else []
+        neighbor_keys = {e["key"] for e in seed_entities} | \
+                        {r[field] for r in relations for field in ("source_key", "target_key")}
+        entities = {e["id"]: e for e in seed_entities}
+        for entity in self.store.fetch_entities_by_keys(neighbor_keys - {e["key"] for e in entities.values()}):
+            entities.setdefault(entity["id"], entity)
+
+        chunk_ids = candidate_ids | {e["chunk_id"] for e in entities.values()} | \
+                    {r["chunk_id"] for r in relations}
+        # Citation binding runs in every mode: after the graph expansion introduced more
+        # chunks, fetch their evidence too, then re-fetch once in stable rowid order.
+        relation_ids |= {r["id"] for r in self.store.fetch_relations_by_chunk_ids(chunk_ids)}
+        relations = self.store.fetch_relations(relation_ids) if relation_ids else []
+        chunks = self.store.fetch_chunks(chunk_ids)
+
+        # Version anchor: sources replaced/deleted during this assembly (or since the
+        # run's anchor) are dropped whole — a query never mixes versions of a source.
+        final = self.store.generations()
+        stable = {row["source"] for row in final if anchor.get(row["source"]) == row["generation"]}
+        snapshot["chunks"] = [c for c in chunks if c["source"] in stable]
+        snapshot["entities"] = [e for e in entities.values() if e["chunk_id"] in
+                                {c["id"] for c in snapshot["chunks"]}]
+        snapshot["relations"] = [r for r in relations if r["chunk_id"] in
+                                 {c["id"] for c in snapshot["chunks"]}]
+        snapshot["sources"] = [s for s in sources if s["source"] in stable]
+
+        stats_n, avgdl = self.store.bm25_corpus()
+        if query_terms and stats_n:
+            idf = {term: idf_for(stats_n, df) for term, df in
+                   ((t, self.store.bm25_df(t)) for t in sorted(set(query_terms))) if df > 0}
+            snapshot["bm25_stats"] = {"idf": idf, "avgdl": avgdl}
         return snapshot
+
+    # ── ingest ──
 
     def ingest(self, source, force=False):
         source = source_key(source)
@@ -71,18 +186,31 @@ class GraphService:
         source = source_key(source)
         if not text.strip() or len(text) > 500000:
             raise ValueError("Document text must contain 1..500000 characters")
-        self._snapshot()
+        stored_fp = self.store.fingerprint()
+        if stored_fp and stored_fp != self.client.fingerprint and self.store.stats()["sources"]:
+            raise ValueError("Index model fingerprint differs. Select the original model/--offline setting or a fresh --data-dir.")
         content_hash = _digest(f"index-v2:{self.chunk_size}:{self.overlap}:" + text)
         source_state = self.store.source_state(source)
         old = source_state["record"]
         if old and old["content_hash"] == content_hash and not force:
-            return {"source": source, "status": "unchanged", "revision": old["revision"]}
+            result = {"source": source, "status": "unchanged", "revision": old["revision"]}
+            if self.qdrant is not None:
+                # Retry idempotent publication even after a process restart. Reuse
+                # persisted extraction/vectors rather than paying for model calls.
+                records = self.store.source_records(source)
+                if self.store.source_state(source)["revision"] != source_state["revision"]:
+                    raise ValueError("Source changed during vector repair; retry ingestion")
+                self._publish_vectors(source, records["chunks"], records["entities"], records["relations"], result)
+                if self.cache is not None:
+                    self.cache.clear()
+            return result
         chunks = split_chunks(text, source, self.chunk_size, self.overlap)
         if not chunks or len(chunks) > 1024:
             raise ValueError("Document must produce 1..1024 chunks")
         for chunk in chunks:
             chunk["id"] = _digest(f"{source}:{content_hash}:{chunk['chunk_index']}")
-        # Nothing is published until every extraction and all three vector indexes succeed.
+        # Complete extraction and embedding generation before publishing the ledger.
+        # Qdrant publication follows that transaction and can fail independently.
         with ThreadPoolExecutor(max_workers=self.workers) as pool:
             extractions = list(pool.map(self.client.extract, [c["text"] for c in chunks]))
         entities, relations = [], []
@@ -124,11 +252,71 @@ class GraphService:
         stored_chunks = [{"id": c["id"], "text": c["text"], "embedding": c["embedding"],
                           "metadata": {key: value for key, value in c.items() if key not in ("id", "text", "embedding")}}
                          for c in chunks]
+        terms = []
+        for chunk in chunks:
+            counts = {}
+            for term in index_terms(chunk["text"]):
+                counts[term] = counts.get(term, 0) + 1
+            terms.extend({"chunk_id": chunk["id"], "term": term, "tf": tf} for term, tf in counts.items())
         self.store.replace_source(source, content_hash, self.client.fingerprint, chunks=stored_chunks,
-                                  entities=entities, relations=relations, expected_revision=source_state["revision"])
-        return {"source": source, "status": "indexed", "chunks": len(chunks), "entities": len(entities),
-                "relations": len(relations), "graph_status": "ready" if relations else "no_relations",
-                "revision": source_state["revision"] + 1, "offline": self.client.offline}
+                                  entities=entities, relations=relations,
+                                  expected_revision=source_state["revision"], terms=terms)
+        result = {"source": source, "status": "indexed", "chunks": len(chunks), "entities": len(entities),
+                  "relations": len(relations), "graph_status": "ready" if relations else "no_relations",
+                  "revision": source_state["revision"] + 1, "offline": self.client.offline}
+        self._publish_vectors(source, stored_chunks, entities, relations, result)
+        if self.cache is not None:
+            self.cache.clear()
+        return result
+
+    def _publish_vectors(self, source, chunks, entities, relations, result):
+        """Ledger is committed; mirror vectors into Qdrant. Orphaned copies stay invisible (PG decides)."""
+        if self.qdrant is None:
+            return
+        try:
+            self.qdrant.ensure(len(chunks[0]["embedding"]))
+            self.qdrant.upsert("chunks", chunks, lambda row: source)
+            self.qdrant.upsert("entities", entities, lambda row: source)
+            self.qdrant.upsert("relations", relations, lambda row: source)
+            result["vector_status"] = "ready"
+        except Exception as exc:
+            result["vector_status"] = "pending"
+            result["vector_warning"] = f"Qdrant upsert failed; semantic recall may miss this source: {exc}"
+        finally:
+            # Even partial publication can change recall. Persist a shared cache
+            # revision so a repair is safe across CLI/Web and failed Redis clears.
+            self.store.advance_recall_revision()
+
+    # ── background ingest tasks (single worker; status lives in the ledger) ──
+
+    def submit_ingest(self, source, *, text=None, force=False):
+        task_id = uuid4().hex
+        self.store.task_create("ingest", {"source": source, "text": text, "force": force}, task_id)
+        if self._pool is None:
+            self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="rag-ingest")
+        self._pool.submit(self._run_task, task_id)
+        return task_id
+
+    def _run_task(self, task_id):
+        self.store.task_update(task_id, "running")
+        task = self.store.task_get(task_id)
+        try:
+            payload = task["payload"]
+            if payload.get("text") is not None:
+                result = self.ingest_text(payload["source"], payload["text"], force=payload.get("force", False))
+            else:
+                result = self.ingest(payload["source"], force=payload.get("force", False))
+            self.store.task_update(task_id, "done", result=result)
+        except Exception as exc:
+            self.store.task_update(task_id, "failed", error=str(exc))
+
+    def task_get(self, task_id):
+        return self.store.task_get(task_id)
+
+    def task_list(self, limit=50):
+        return self.store.task_list(limit)
+
+    # ── retrieval ──
 
     def sync(self, directory, prune=False, force=False):
         directory = Path(directory).resolve()
@@ -150,17 +338,21 @@ class GraphService:
                     continue
                 old = Path(row["source"])
                 if old.is_relative_to(directory) and row["source"] not in present:
-                    summary["deleted"] += int(self.store.delete(row["source"]))
+                    summary["deleted"] += int(self.delete(row["source"])["deleted"])
         return summary
 
-    def search(self, question, mode="hybrid_graph", top_k=5, threshold=.25, rerank=False):
-        return self._search_snapshot(self._snapshot(), question, mode, top_k, threshold, rerank)
-
-    def _search_snapshot(self, snapshot, question, mode="hybrid_graph", top_k=5, threshold=.25, rerank=False):
+    def search(self, question, mode="hybrid_graph", top_k=5, threshold=.25, rerank=False, anchor=None):
         started = time.perf_counter()
+        corpus_empty = self.store.stats()["chunks"] == 0
+        snapshot = self._bounded_snapshot(question, mode, top_k, threshold, anchor=anchor)
+        return self._search_snapshot(snapshot, question, mode, top_k, threshold, rerank, corpus_empty, started=started)
+
+    def _search_snapshot(self, snapshot, question, mode="hybrid_graph", top_k=5, threshold=.25,
+                         rerank=False, corpus_empty=False, started=None):
+        started = time.perf_counter() if started is None else started
         result = DualLevelRetriever(snapshot, self.client).search(question, mode, top_k, threshold, rerank)
         result["retrieval_trace"]["snapshot_revisions"] = {s["source"]: s["revision"] for s in snapshot["sources"]}
-        result.update({"status": "ok" if result["chunks_used"] else ("no_docs" if not snapshot["chunks"] else "no_relevant"),
+        result.update({"status": "ok" if result["chunks_used"] else ("no_docs" if corpus_empty else "no_relevant"),
                        "sources": list(dict.fromkeys(c["metadata"]["source"] for c in result["chunks_used"])),
                        "elapsed_ms": round((time.perf_counter() - started) * 1000, 3), "offline": self.client.offline})
         return result
@@ -181,15 +373,34 @@ class GraphService:
         result["answer"] = answer
         return result
 
+    def _corpus_signature(self):
+        state = sorted((row["source"], row["content_hash"], row["revision"])
+                       for row in self.store.list_sources())
+        return _digest(json.dumps([self.qdrant is not None, state, self.store.recall_revision()], ensure_ascii=False))
+
     def query(self, question, **kwargs):
-        return self._answer(question, self.search(question, **kwargs))
+        key = None
+        if self.cache is not None and self.cache.enabled:
+            signature = self._corpus_signature()
+            key = cache_key(self.client.fingerprint, question, kwargs.get("mode", "hybrid_graph"),
+                            kwargs.get("top_k", 5), kwargs.get("threshold", .25), kwargs.get("rerank", False),
+                            corpus_signature=signature)
+            cached = self.cache.get(key)
+            if cached is not None and signature == self._corpus_signature():
+                return {**cached, "cached": True}
+        result = self._answer(question, self.search(question, **kwargs))
+        if (key is not None and result.get("status") in ("ok", "insufficient_evidence")
+                and signature == self._corpus_signature()):
+            self.cache.put(key, result)
+        return result
 
     def agentic_query(self, question, max_iterations=3, mode="hybrid_graph", top_k=5, threshold=.25, rerank=False):
         if not 1 <= max_iterations <= 10:
             raise ValueError("max_iterations must be 1..10")
         # Validate before invoking a model planner or accumulating unbounded contexts.
-        snapshot = self._snapshot()
-        initial = self._search_snapshot(snapshot, question, mode=mode, top_k=top_k, threshold=threshold)
+        corpus_empty = self.store.stats()["chunks"] == 0
+        anchor = {row["source"]: row["generation"] for row in self.store.generations()}
+        initial = self.search(question, mode=mode, top_k=top_k, threshold=threshold, anchor=anchor)
         steps = [initial]
         if initial["status"] != "no_docs" and max_iterations > 1:
             seen = {canonical(question)}
@@ -199,7 +410,7 @@ class GraphService:
                 if not query.strip() or canonical(query) in seen:
                     continue
                 seen.add(canonical(query))
-                steps.append(self._search_snapshot(snapshot, query, mode=mode, top_k=top_k, threshold=threshold))
+                steps.append(self.search(query, mode=mode, top_k=top_k, threshold=threshold, anchor=anchor))
         chunks, relations = {}, {}
         for step in steps:
             for rank, chunk in enumerate(step["chunks_used"]):
@@ -220,14 +431,26 @@ class GraphService:
                   "status": "ok" if selected else initial["status"]}
         return self._answer(question, result)
 
+    # ── inspection ──
+
     def list_sources(self):
         return self.store.list_sources()
 
     def delete(self, source):
-        return {"source": source_key(source), "deleted": self.store.delete(source_key(source))}
+        source = source_key(source)
+        deleted = self.store.delete(source)
+        result = {"source": source, "deleted": deleted}
+        if deleted and self.qdrant is not None:
+            try:
+                self.qdrant.delete_source(source)
+            except Exception as exc:
+                result["vector_warning"] = f"Qdrant cleanup deferred (harmless: invisible in PG): {exc}"
+        if deleted and self.cache is not None:
+            self.cache.clear()
+        return result
 
     def graph(self):
-        # Exporting stored evidence does not require model credentials or model calls.
+        # Explicit whole-store export: not on the query path, no model credentials required.
         snapshot = self.store.records()
         chunks = {c["id"]: c for c in snapshot["chunks"]}
         nodes = {}
@@ -242,11 +465,20 @@ class GraphService:
 
     def doctor(self):
         check = self.store.check()
-        snapshot = self.store.records()
-        compatible = not snapshot["sources"] or (self.client is not None and snapshot["fingerprint"] == self.client.fingerprint)
-        return {"storage": check, "stats": self.store.stats(), "data_dir": str(self.data_dir),
-                "model_compatible": compatible, "provider": self.client.health() if self.client else {"configured": False, "network_verified": False},
-                "scope": "single-node, single-tenant SQLite; exact vector search"}
+        stats = self.store.stats()
+        fingerprint = self.store.fingerprint()
+        compatible = not stats["sources"] or (self.client is not None and fingerprint == self.client.fingerprint)
+        services = {"storage_mode": "services" if self.qdrant is not None else "local (SQLite adapter, exact vector scan)"}
+        if self.qdrant is not None:
+            try:
+                services["qdrant"] = self.qdrant.health()
+            except Exception as exc:
+                services["qdrant"] = {"configured": True, "error": str(exc)}
+        services["answer_cache"] = "enabled" if self.cache is not None and self.cache.enabled else "disabled"
+        return {"storage": check, "stats": stats, "data_dir": str(self.data_dir or self.store.path),
+                "model_compatible": compatible, "services": services,
+                "provider": self.client.health() if self.client else {"configured": False, "network_verified": False},
+                "scope": "single-node, single-tenant; PG ledger + Qdrant recall + optional Redis cache"}
 
     def evaluate(self, questions, modes=("hybrid", "local", "global", "hybrid_graph"), top_k=5, threshold=.25):
         if not questions:

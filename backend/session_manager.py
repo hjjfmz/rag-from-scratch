@@ -1,3 +1,9 @@
+"""Chat sessions. SQLite file for local/dev runs; PostgreSQL in the services stack.
+
+Same schema and behavior on both backends; the backend is chosen explicitly
+(`dsn=` for PostgreSQL, default SQLite file otherwise) so tests never need a
+database server and production never silently falls back to a file.
+"""
 import glob
 import json
 import os
@@ -13,54 +19,106 @@ DEFAULT_DB_PATH = os.path.join(SESSION_DIR, "sessions.db")
 
 
 class SessionManager:
-    def __init__(self, max_history: int = 10, db_path: str | None = None):
+    def __init__(self, max_history: int = 10, db_path: str | None = None, dsn: str | None = None):
         self.max_history = max_history
+        self.dsn = (dsn or "").strip()
         self.db_path = db_path or DEFAULT_DB_PATH
+        self._pg = None
+        if self.dsn:
+            import psycopg
+            from psycopg.rows import dict_row
+            self._pg = psycopg
+            self._dict_row = dict_row
+            self._init_db()
+        else:
+            os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
+            self._init_db()
+            self._maybe_migrate_json_sessions()
 
-        os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
-        self._init_db()
-        self._maybe_migrate_json_sessions()
+    # ── backend seam ──
 
     @contextmanager
     def _connect(self):
-        conn = sqlite3.connect(self.db_path, check_same_thread=False)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA foreign_keys = ON;")
-        try:
-            yield conn
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            raise
-        finally:
-            conn.close()
+        if self._pg is not None:
+            conn = self._pg.connect(self.dsn, row_factory=self._dict_row, autocommit=False)
+            try:
+                yield conn
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
+        else:
+            conn = sqlite3.connect(self.db_path, check_same_thread=False)
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA foreign_keys = ON;")
+            try:
+                yield conn
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
+
+    def _sql(self, query: str, params: tuple) -> tuple[str, tuple]:
+        """Statements are written SQLite-style; PG only needs dialect conversion."""
+        if self._pg is not None:
+            if "INSERT OR IGNORE INTO" in query:
+                query = query.replace("INSERT OR IGNORE INTO", "INSERT INTO")
+                query = query.rstrip().rstrip(";") + " ON CONFLICT DO NOTHING;"
+            query = query.replace("?", "%s")
+            return query, params
+        return query, params
+
+    def _execute(self, conn, query: str, params: tuple = ()):
+        return conn.execute(*self._sql(query, params))
 
     def _init_db(self):
         with self._connect() as conn:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS sessions (
-                    session_id TEXT PRIMARY KEY,
-                    title TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                );
-                """
-            )
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS messages (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    session_id TEXT NOT NULL,
-                    role TEXT NOT NULL,
-                    content TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    FOREIGN KEY (session_id) REFERENCES sessions(session_id) ON DELETE CASCADE
-                );
-                """
-            )
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, id);")
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated_at);")
+            if self._pg is not None:
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS sessions (
+                        session_id TEXT PRIMARY KEY,
+                        title TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    );
+                """)
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS messages (
+                        id BIGSERIAL PRIMARY KEY,
+                        session_id TEXT NOT NULL,
+                        role TEXT NOT NULL,
+                        content TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        FOREIGN KEY (session_id) REFERENCES sessions(session_id) ON DELETE CASCADE
+                    );
+                """)
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, id);")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated_at);")
+            else:
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS sessions (
+                        session_id TEXT PRIMARY KEY,
+                        title TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    );
+                """)
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS messages (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        session_id TEXT NOT NULL,
+                        role TEXT NOT NULL,
+                        content TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        FOREIGN KEY (session_id) REFERENCES sessions(session_id) ON DELETE CASCADE
+                    );
+                """)
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, id);")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated_at);")
 
     def _maybe_migrate_json_sessions(self):
         json_paths = [
@@ -88,19 +146,17 @@ class SessionManager:
                 messages = data.get("messages") or []
 
                 with self._connect() as conn:
-                    conn.execute(
+                    self._execute(conn,
                         "INSERT OR IGNORE INTO sessions(session_id, title, created_at, updated_at) VALUES(?,?,?,?);",
-                        (session_id, title, created_at, updated_at),
-                    )
+                        (session_id, title, created_at, updated_at))
                     for m in messages:
                         role = m.get("role")
                         content = m.get("content")
                         if not role or content is None:
                             continue
-                        conn.execute(
+                        self._execute(conn,
                             "INSERT INTO messages(session_id, role, content, created_at) VALUES(?,?,?,?);",
-                            (session_id, role, str(content), updated_at),
-                        )
+                            (session_id, role, str(content), updated_at))
             except Exception:
                 continue
 
@@ -108,25 +164,22 @@ class SessionManager:
         session_id = str(uuid.uuid4())
         now = datetime.now().isoformat()
         with self._connect() as conn:
-            conn.execute(
+            self._execute(conn,
                 "INSERT INTO sessions(session_id, title, created_at, updated_at) VALUES(?,?,?,?);",
-                (session_id, "New Chat", now, now),
-            )
+                (session_id, "New Chat", now, now))
         return session_id
 
     def load_session(self, session_id: str) -> dict | None:
         with self._connect() as conn:
-            s = conn.execute(
+            s = self._execute(conn,
                 "SELECT session_id, title, created_at, updated_at FROM sessions WHERE session_id = ?;",
-                (session_id,),
-            ).fetchone()
+                (session_id,)).fetchone()
             if not s:
                 return None
 
-            msgs = conn.execute(
+            msgs = self._execute(conn,
                 "SELECT role, content FROM messages WHERE session_id = ? ORDER BY id ASC;",
-                (session_id,),
-            ).fetchall()
+                (session_id,)).fetchall()
 
         return {
             "session_id": s["session_id"],
@@ -139,38 +192,33 @@ class SessionManager:
     def _ensure_session_exists(self, session_id: str, default_title: str = "New Chat"):
         now = datetime.now().isoformat()
         with self._connect() as conn:
-            conn.execute(
+            self._execute(conn,
                 "INSERT OR IGNORE INTO sessions(session_id, title, created_at, updated_at) VALUES(?,?,?,?);",
-                (session_id, default_title, now, now),
-            )
+                (session_id, default_title, now, now))
 
     def add_message(self, session_id: str, role: str, content: str):
         self._ensure_session_exists(session_id)
 
         now = datetime.now().isoformat()
         with self._connect() as conn:
-            row = conn.execute(
+            row = self._execute(conn,
                 "SELECT COUNT(1) AS n FROM messages WHERE session_id = ?;",
-                (session_id,),
-            ).fetchone()
+                (session_id,)).fetchone()
             msg_count = int(row["n"]) if row else 0
 
             if role == "user" and msg_count == 0:
                 title = content[:30] + ("..." if len(content) > 30 else "")
-                conn.execute(
+                self._execute(conn,
                     "UPDATE sessions SET title = ?, updated_at = ? WHERE session_id = ?;",
-                    (title, now, session_id),
-                )
+                    (title, now, session_id))
             else:
-                conn.execute(
+                self._execute(conn,
                     "UPDATE sessions SET updated_at = ? WHERE session_id = ?;",
-                    (now, session_id),
-                )
+                    (now, session_id))
 
-            conn.execute(
+            self._execute(conn,
                 "INSERT INTO messages(session_id, role, content, created_at) VALUES(?,?,?,?);",
-                (session_id, role, content, now),
-            )
+                (session_id, role, content, now))
 
     def get_history_context(self, session_id: str) -> str:
         session = self.load_session(session_id)
@@ -193,9 +241,8 @@ class SessionManager:
     def list_sessions(self) -> List[dict]:
         self.cleanup_unused_sessions()
         with self._connect() as conn:
-            rows = conn.execute(
-                "SELECT session_id, title, created_at, updated_at FROM sessions ORDER BY updated_at DESC;",
-            ).fetchall()
+            rows = self._execute(conn,
+                "SELECT session_id, title, created_at, updated_at FROM sessions ORDER BY updated_at DESC;").fetchall()
 
         return [
             {
@@ -213,26 +260,27 @@ class SessionManager:
         This keeps the sidebar clean from accidental 'New Chat' clicks.
         """
         with self._connect() as conn:
-            # Find sessions with no messages
             query = """
-                SELECT s.session_id 
-                FROM sessions s 
-                LEFT JOIN messages m ON s.session_id = m.session_id 
-                GROUP BY s.session_id 
+                SELECT s.session_id
+                FROM sessions s
+                LEFT JOIN messages m ON s.session_id = m.session_id
+                GROUP BY s.session_id
                 HAVING COUNT(m.id) = 0
                 ORDER BY s.created_at DESC;
             """
-            unused = conn.execute(query).fetchall()
+            unused = conn.execute(*self._sql(query, ())).fetchall()
 
             if len(unused) > 1:
                 # Keep the first one (most recent), delete the rest
                 ids_to_delete = [r["session_id"] for r in unused[1:]]
-                placeholders = ",".join(["?"] * len(ids_to_delete))
-                conn.execute(
-                    f"DELETE FROM sessions WHERE session_id IN ({placeholders});",
-                    tuple(ids_to_delete),
-                )
+                if self._pg is not None:
+                    conn.execute("DELETE FROM sessions WHERE session_id = ANY(%s);", (ids_to_delete,))
+                else:
+                    placeholders = ",".join(["?"] * len(ids_to_delete))
+                    self._execute(conn,
+                        f"DELETE FROM sessions WHERE session_id IN ({placeholders});",
+                        tuple(ids_to_delete))
 
     def delete_session(self, session_id: str):
         with self._connect() as conn:
-            conn.execute("DELETE FROM sessions WHERE session_id = ?;", (session_id,))
+            self._execute(conn, "DELETE FROM sessions WHERE session_id = ?;", (session_id,))

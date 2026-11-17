@@ -1,4 +1,4 @@
-"""Personal local knowledge CLI. Web continues to use its separate legacy pipeline."""
+"""Personal local knowledge CLI. Web and CLI share one service stack (GraphService)."""
 import argparse
 from contextlib import redirect_stdout
 import json
@@ -92,8 +92,14 @@ def _questions(path):
 def execute(args):
     from rag.graph_service import GraphService
     from rag.model_client import ModelClient, ModelError
-    offline = args.offline
-    data_dir = Path(args.data_dir or ROOT / ".runtime" / ("offline" if offline else "knowledge")).resolve()
+    from rag.settings import load_settings, build_store
+    offline = args.offline or os.getenv("RAG_OFFLINE", "").strip().lower() in ("1", "true", "yes")
+    settings = load_settings()
+    if args.data_dir:
+        # Explicit --data-dir pins the local SQLite adapter, overriding RAG_STORAGE.
+        settings.storage = "local"
+        settings.data_dir = Path(args.data_dir).resolve()
+    data_dir = settings.data_dir
     client = None
     if args.command not in ("list", "delete", "graph"):
         try:
@@ -101,7 +107,18 @@ def execute(args):
         except ModelError:
             if args.command != "doctor":
                 raise
-    service = GraphService(data_dir, client, chunk_size=getattr(args, "chunk_size", 900),
+    store = build_store(settings) if settings.storage == "services" else None
+    qdrant = None
+    if settings.storage == "services" and client is not None:
+        from rag.qdrant_store import QdrantStore
+        qdrant = QdrantStore(settings.qdrant_url, client.fingerprint)
+    cache = None
+    if settings.redis_url:
+        from rag.cache import AnswerCache
+        cache = AnswerCache(settings.redis_url)
+    service = GraphService(data_dir if settings.storage == "local" else None, client,
+                           store=store, qdrant=qdrant, cache=cache,
+                           chunk_size=getattr(args, "chunk_size", 900),
                            overlap=getattr(args, "overlap", 120), workers=getattr(args, "workers", 4))
     if args.command == "ingest":
         return service.ingest(args.source, force=args.force), 0

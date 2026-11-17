@@ -1,8 +1,9 @@
 requests          # Compatible model HTTP services
 python-dotenv     # Load API key from .env file
 PyPDF2            # PDF text extraction
-beautifulsoup4    # HTML → plain text for web scraping
 fastapi           # Web API framework
 uvicorn           # ASGI server for FastAPI
 python-multipart  # For file uploads
 pydantic          # Data validation
+psycopg[binary]  # PostgreSQL driver for the services storage mode
+redis            # Answer cache backend (optional at runtime, used when RAG_REDIS_URL is set)

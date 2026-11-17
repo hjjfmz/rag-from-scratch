@@ -548,6 +548,7 @@ function selectUploadTab(tab) {
     const urlPane = document.getElementById('pane-url');
 
     clearUploadError();
+    if (!fileTab || !filePane) return;
 
     if (tab === 'url') {
         fileTab.classList.remove('active');
@@ -620,6 +621,19 @@ function addFiles(files) {
     clearUploadError();
 }
 
+async function pollTask(taskId, { timeoutMs = 180000 } = {}) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+        const res = await fetch(`/api/tasks/${taskId}`);
+        if (!res.ok) throw new Error('Task query failed');
+        const task = await res.json();
+        if (task.status === 'done') return task;
+        if (task.status === 'failed') throw new Error(task.error || 'Import failed');
+        await new Promise(r => setTimeout(r, 800));
+    }
+    throw new Error('Import timed out — check the task list later.');
+}
+
 async function uploadSelectedFiles() {
     if (!selectedFiles.length) return;
     clearUploadError();
@@ -628,6 +642,7 @@ async function uploadSelectedFiles() {
     btn.disabled = true;
     btn.textContent = 'Uploading...';
 
+    const failures = [];
     try {
         for (const file of selectedFiles) {
             const formData = new FormData();
@@ -638,53 +653,29 @@ async function uploadSelectedFiles() {
                 const text = await res.text().catch(() => '');
                 throw new Error(text || 'Upload failed');
             }
+            const queued = await res.json();
+            btn.textContent = `Indexing ${file.name}...`;
+            try {
+                await pollTask(queued.task_id);
+            } catch (e) {
+                failures.push(`${file.name}: ${String(e?.message || e)}`);
+            }
         }
 
-        selectedFiles = [];
-        renderSelectedFiles();
-        updateUploadButtons();
-        await loadSessions();
-        hideUpload();
+        if (failures.length) {
+            setUploadError(failures.join('\n'));
+        } else {
+            selectedFiles = [];
+            renderSelectedFiles();
+            updateUploadButtons();
+            await loadSessions();
+            hideUpload();
+        }
     } catch (e) {
         setUploadError(String(e?.message || e || 'Upload failed'));
     } finally {
         btn.textContent = 'Upload';
         btn.disabled = selectedFiles.length === 0;
-    }
-}
-
-async function ingestUrl() {
-    clearUploadError();
-    const input = document.getElementById('url-input');
-    const url = (input.value || '').trim();
-    if (!url) {
-        setUploadError('Please enter a URL.');
-        return;
-    }
-
-    const btn = document.getElementById('upload-url-btn');
-    btn.disabled = true;
-    btn.textContent = 'Ingesting...';
-
-    try {
-        const res = await fetch('/api/documents/ingest-url', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ url })
-        });
-        if (!res.ok) {
-            const text = await res.text().catch(() => '');
-            throw new Error(text || 'Ingest URL failed');
-        }
-
-        input.value = '';
-        await loadSessions();
-        hideUpload();
-    } catch (e) {
-        setUploadError(String(e?.message || e || 'Ingest URL failed'));
-    } finally {
-        btn.disabled = false;
-        btn.textContent = 'Ingest URL';
     }
 }
 

@@ -940,7 +940,6 @@
 
             <div class="upload-tabs" role="tablist" aria-label="Upload tabs">
                 <button class="upload-tab active" id="tab-file" onclick="selectUploadTab('file')" type="button">📄 File</button>
-                <button class="upload-tab" id="tab-url" onclick="selectUploadTab('url')" type="button">🔗 URL</button>
             </div>
 
             <div class="upload-error" id="upload-error"></div>
@@ -956,18 +955,6 @@
                         <span class="upload-hint">Files will be copied into sample_data/ and ingested.</span>
                     </div>
                     <div id="selected-files" style="margin-top:12px; display:flex; gap:8px; flex-wrap:wrap;"></div>
-                </div>
-            </div>
-
-            <div class="upload-pane" id="pane-url" role="tabpanel" aria-labelledby="tab-url">
-                <div class="field">
-                    <label for="url-input">Web page URL</label>
-                    <input type="text" id="url-input" placeholder="https://example.com/article">
-                    <div class="upload-hint">The server will fetch the page, extract text, and ingest it into the index.</div>
-                </div>
-                <div class="upload-row" style="margin-top:12px;">
-                    <button class="btn-primary" type="button" id="upload-url-btn" onclick="ingestUrl()">Ingest URL</button>
-                    <span class="upload-hint">Only http(s) is supported.</span>
                 </div>
             </div>
         </div>

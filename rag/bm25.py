@@ -99,6 +99,16 @@ def tokenize(text: str) -> list[str]:
     return [w for w in words if w not in STOPWORDS]
 
 
+def idf_for(n_docs: int, doc_freq: int) -> float:
+    """
+    BM25 IDF for one term, shared by index() and by query paths that read
+    persisted corpus statistics (so scores stay identical in both modes).
+
+    📚 IDF = log((N - df + 0.5) / (df + 0.5) + 1)
+    """
+    return math.log((n_docs - doc_freq + 0.5) / (doc_freq + 0.5) + 1)
+
+
 # ── BM25 Class ────────────────────────────────────────────────
 
 
@@ -173,9 +183,7 @@ class BM25:
         #   - Word in 1 doc:    log((N-1+0.5)/(1+0.5)+1) ≈ log(N) (valuable)
         self.idf = {}
         for term, freq in df.items():
-            self.idf[term] = math.log(
-                (self.n_docs - freq + 0.5) / (freq + 0.5) + 1
-            )
+            self.idf[term] = idf_for(self.n_docs, freq)
 
     def _score_document(self, query_tokens: list[str], doc_idx: int) -> float:
         """

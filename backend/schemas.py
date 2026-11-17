@@ -14,6 +14,13 @@ class ChatRequest(BaseModel):
     threshold: float = 0.3
     use_reranker: bool = False
 
+class Citation(BaseModel):
+    id: int
+    source: str
+    score: float = 0.0
+    snippet: str = ""
+    citation_id: str = ""
+
 class ChatResponse(BaseModel):
     answer: str
     sources: List[str]
@@ -21,6 +28,9 @@ class ChatResponse(BaseModel):
     user_guidance: str
     retrieval_quality: Dict[str, Any]
     session_id: str
+    citations: List[Citation] = []
+    mode: str = ""
+    cached: bool = False
 
 class SessionInfo(BaseModel):
     session_id: str

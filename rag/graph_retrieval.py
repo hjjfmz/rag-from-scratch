@@ -98,6 +98,12 @@ class DualLevelRetriever:
             documents = [{"text": " ".join(tokens(c["text"])), "metadata": {"chunk_id": c["id"]}}
                          for c in self.chunks.values()]
             bm.index(documents)
+            stats = self.snapshot.get("bm25_stats")
+            if stats and stats.get("idf"):
+                # Candidate-window ranking uses whole-corpus IDF/avgdl persisted at ingest,
+                # so scores match a full-corpus index exactly; the formula above is untouched.
+                bm.avg_doc_length = stats.get("avgdl") or bm.avg_doc_length
+                bm.idf = {**bm.idf, **stats["idf"]}
             ranked["keyword"] = self._candidate_ids((r["metadata"]["chunk_id"] for r in bm.search(" ".join(tokens(question)), top_k=len(documents))), budget)
         if mode in ("local", "hybrid_graph"):
             names = " ".join([question] + keywords.get("low_level", []))

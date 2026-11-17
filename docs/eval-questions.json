@@ -1,0 +1,14 @@
+[
+  {"id": 1, "question": "一个 Pod 使用多少内存？", "expected_sources": ["service.md"], "expected_entities": ["pod", "container"]},
+  {"id": 2, "question": "Gateway Service 是谁负责的？", "expected_sources": ["team.md"], "expected_entities": ["alice", "gateway service"]},
+  {"id": 3, "question": "readiness probe 连续失败几次会触发重启？", "expected_sources": ["service.md", "ops.md"], "expected_entities": ["scheduler"]},
+  {"id": 4, "question": "存储节点最多可以挂载多少块数据盘？", "expected_sources": ["ops.md"], "expected_entities": []},
+  {"id": 5, "question": "failover 期间谁控制流量？", "expected_sources": ["team.md"], "expected_entities": ["scheduler"]},
+  {"id": 6, "question": "volume snapshot 多久做一次？", "expected_sources": ["team.md"], "expected_entities": ["storage team"]},
+  {"id": 7, "question": "网关和探针如何共同影响容器可用性？", "expected_sources": ["service.md", "ops.md"], "expected_entities": ["gateway service", "scheduler"]},
+  {"id": 8, "question": "一个 Cluster 最多包含多少个 Pod？", "expected_sources": ["service.md"], "expected_entities": ["cluster"]},
+  {"id": 9, "question": "旧集群的容器内存配额是多少？", "expected_sources": ["legacy.md"], "expected_entities": []},
+  {"id": 10, "question": "旧集群什么时候下线？", "expected_sources": ["legacy.md"], "expected_entities": []},
+  {"id": 11, "question": "公司食堂本周菜单是什么？", "expected_sources": [], "answerable": false},
+  {"id": 12, "question": "Ingress Gateway 的作用是什么？", "expected_sources": ["service.md"], "expected_entities": ["ingress gateway"]}
+]
